@@ -2,7 +2,7 @@
 
 A local-first Chrome/Edge extension for saving videos from your signed-in SharePoint browser session. A small optional helper handles DASH streams with yt-dlp and FFmpeg.
 
-**Early prototype (0.1.0).** Automated checks pass; real SharePoint tenants and browsers still need end-to-end validation. It is not published in the Chrome Web Store.
+**Early prototype (0.1.0).** Validated end to end on macOS with Chrome: a private SharePoint DASH recording downloaded and merged into a 1080p MP4 with AAC audio. Other tenants and browsers still need validation. It is not published in the Chrome Web Store.
 
 ## Why an extension and a helper?
 
