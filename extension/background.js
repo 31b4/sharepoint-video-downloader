@@ -137,7 +137,7 @@ async function run(tabId,mode) {
   try {
   const tab=await chrome.tabs.get(tabId);
   if(!allowedUrl(tab.url)||!new URL(tab.url).hostname.endsWith('.sharepoint.com')) throw new Error('Open the SharePoint video in this tab first.');
-    await chrome.notifications.clear('sharepoint-download').catch(()=>{});
+    if(chrome.notifications)await chrome.notifications.clear('sharepoint-download').catch(()=>{});
     job={id:crypto.randomUUID(),tabId,title:tab.title || 'SharePoint video',state:'reading',status:'Finding your video…',progress:null};
     await update({});
     let media=await inspect(tabId);
@@ -196,8 +196,16 @@ chrome.downloads.onChanged.addListener(async delta=>{
     }
   }
 });
-chrome.notifications.onClicked.addListener(id=>{if(id==='sharepoint-download')reveal().catch(()=>{});});
-chrome.notifications.onButtonClicked.addListener(id=>{if(id==='sharepoint-download')reveal().catch(()=>{});});
+let notificationHandlersRegistered=false;
+function registerNotificationHandlers() {
+  if(notificationHandlersRegistered || !chrome.notifications)return;
+  const open=id=>{if(id==='sharepoint-download')reveal().catch(()=>{});};
+  chrome.notifications.onClicked.addListener(open);
+  chrome.notifications.onButtonClicked.addListener(open);
+  notificationHandlersRegistered=true;
+}
+registerNotificationHandlers();
+chrome.permissions.onAdded?.addListener(registerNotificationHandlers);
 chrome.runtime.onMessage.addListener((message,sender,reply)=>{
   if(sender.id!==chrome.runtime.id)return;
   (async()=>{

@@ -22,6 +22,7 @@ async function setup(options={}) {
     notifications:{create:async(id,value)=>notifications.push(value),clear:async()=>{},onClicked:{addListener(fn){clicked=fn;}},onButtonClicked:{addListener(){}}},
     downloads:{onChanged:{addListener(fn){downloadChanged=fn;}},download:async()=>42,search:async()=>[{filename:'/Downloads/Workshop.mp4'}],show:async()=>{},cancel:async()=>{}}
   };
+  if(options.noNotifications){delete chrome.notifications;chrome.permissions.contains=async()=>false;}
   await import('../extension/background.js?test='+sequence++);
   async function request(message){return new Promise(resolve=>handler(message,{id:'test-extension'},resolve));}
   return {updates,ports,notifications,reloads,badges,request,changed:delta=>downloadChanged(delta),click:()=>clicked('sharepoint-download')};
@@ -72,4 +73,10 @@ test('cancelling a Chrome download never starts the helper',async()=>{
   await f.request({action:'download',tabId:1});await until(()=>f.updates.at(-1)?.downloadId===42);
   await f.changed({id:42,state:{current:'interrupted'},error:{current:'USER_CANCELED'}});
   assert.equal(f.ports.length,0);assert.equal(f.updates.at(-1).state,'cancelled');
+});
+
+test('downloads work when optional notification APIs are unavailable',async()=>{
+  const f=await setup({noNotifications:true});await f.request({action:'download',tabId:1,mode:'stream'});await until(()=>f.ports[0]?.sent.length);
+  f.ports[0].emit({state:'complete',status:'Download complete',path:'/Downloads/video.mp4',folder:'/Downloads'});f.ports[0].end();
+  await until(()=>f.updates.at(-1)?.state==='complete');assert.equal(f.notifications.length,0);
 });
