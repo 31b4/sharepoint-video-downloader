@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "SharePoint Video Downloader",
+  "description": "Save SharePoint videos from your signed-in browser. Optional local streaming helper.",
+  "version": "0.1.0",
+  "minimum_chrome_version": "120",
+  "permissions": ["activeTab", "scripting", "downloads", "nativeMessaging", "storage"],
+  "action": {"default_popup": "popup.html", "default_title": "Download SharePoint video"},
+  "background": {"service_worker": "background.js", "type": "module"}
+}
