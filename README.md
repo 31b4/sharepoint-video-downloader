@@ -44,7 +44,7 @@ Install Python 3, yt-dlp and FFmpeg using your package manager, load the extensi
 ## Privacy and permissions
 
 - Runs only when you click Download on the active SharePoint tab; no background browsing monitoring.
-- Uses `activeTab` and `scripting` to inspect the current video page; `downloads` to save files; `nativeMessaging` for the optional local helper; `storage.session` for job status.
+- Uses `activeTab` and `scripting` to inspect the current video page; `downloads` to save files; `nativeMessaging` for the optional local helper; `storage.session` for job status. The helper also keeps a local `last-status.json` with the latest status and completed file path, never the source URL.
 - No analytics, project backend, cookie export, password collection, or persistent signed-URL storage.
 - SharePoint metadata and media requests go to Microsoft’s servers. The helper receives the single selected stream URL and never opens a local HTTP server.
 - The helper writes the signed URL into a private temporary file for yt-dlp, removes it after completion, and suppresses raw tool output that could contain credentials. Partial media files may remain after failure.

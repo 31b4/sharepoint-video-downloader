@@ -56,8 +56,10 @@ async function start(tabId, mode) {
   if (!allowedUrl(media.manifest)) throw new Error('No supported stream found. Play the video and try again.');
   busy = true;
   await update({status:'Connecting to local helper…'});
+  let terminal = false;
   port = chrome.runtime.connectNative('io.github.sharepoint_video_downloader');
   port.onMessage.addListener(message => {
+    if (message.state === 'complete' || message.state === 'error') terminal = true;
     const status = String(message.status || 'Working…').slice(0, 300);
     update({status,progress:message.progress,path:message.path});
   });
@@ -65,7 +67,7 @@ async function start(tabId, mode) {
     const error = chrome.runtime.lastError;
     busy = false;
     port = null;
-    if (error) update({status:'Helper disconnected. Install the helper using the extension ID below, then retry.'});
+    if (error && !terminal) update({status:'Helper disconnected. Install the helper using the extension ID below, then retry.'});
   });
   port.postMessage({action:'download',url:media.manifest,title:filename(media.title)});
 }

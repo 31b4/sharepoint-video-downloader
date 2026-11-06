@@ -7,3 +7,4 @@ node_modules/
 *.part
 *.log
 .env*
+last-status.json

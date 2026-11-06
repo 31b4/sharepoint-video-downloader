@@ -37,6 +37,13 @@ def read_message(stream):
 
 
 def send(message):
+    # Keep only the latest local status, never the source URL.
+    status_file = Path(__file__).with_name('last-status.json')
+    try:
+        status_file.write_text(json.dumps(message))
+        status_file.chmod(0o600)
+    except OSError:
+        pass
     payload = json.dumps(message).encode('utf-8')
     sys.stdout.buffer.write(struct.pack('=I', len(payload)) + payload)
     sys.stdout.buffer.flush()
@@ -112,7 +119,7 @@ def download(message):
                 raise ValueError('Download failed. Reload the SharePoint video and retry. Its link may have expired or access may be restricted.')
             if not completed or not completed.is_file() or completed.stat().st_size == 0:
                 raise ValueError('The download finished without a video file.')
-            send({'status': 'Download complete', 'progress': 100, 'path': str(completed)})
+            send({'state': 'complete', 'status': 'Download complete', 'progress': 100, 'path': str(completed)})
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -128,9 +135,11 @@ def main():
         message = read_message(sys.stdin.buffer)
         if message is not None:
             download(message)
-    except (ValueError, OSError, json.JSONDecodeError):
+    except ValueError as error:
+        send({'state': 'error', 'status': str(error) if str(error).startswith(('Download failed.', 'Install ', 'The download finished')) else 'Invalid download request.'})
+    except OSError:
         # Never include exception details: upstream messages can contain signed URLs.
-        send({'status': 'Download failed. Check helper dependencies, reload the video, and retry.'})
+        send({'state': 'error', 'status': 'Download failed. Check helper dependencies, reload the video, and retry.'})
 
 
 if __name__ == '__main__':
