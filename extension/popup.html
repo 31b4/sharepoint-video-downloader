@@ -1,6 +1,9 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><title>SharePoint Video Downloader</title><link rel="stylesheet" href="popup.css"></head><body>
-<div class="mark">↓</div><h1>Save your video</h1><p>Open a SharePoint video in this tab. Your download stays on this computer.</p>
-<button id="download">Download video</button><button id="stream" class="secondary">Download stream with helper</button>
-<div id="status" role="status">Ready when you are.</div><progress id="progress" max="100" hidden></progress>
-<details><summary>Local helper setup</summary><p>Use this extension ID when installing the helper:</p><code id="extension-id"></code><p>See the repository’s README for setup. No passwords or video links are sent to the project.</p></details>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>SharePoint Video Downloader</title><link rel="stylesheet" href="popup.css"></head><body>
+<header><img src="icon128.png" width="38" height="38" alt=""><span>SHAREPOINT VIDEO DOWNLOADER</span></header>
+<h1>Your video.<br>Saved on your Mac.</h1><p class="intro">Open a SharePoint video, then save a copy to watch offline.</p>
+<section id="job" aria-live="polite"><div class="status-row"><span id="state-dot"></span><strong id="state-label">Ready to download</strong><span id="percent"></span></div><p id="title" hidden></p><p id="status" role="status">Your browser session stays on this computer.</p><progress id="progress" max="100" hidden aria-label="Overall download progress"></progress>
+<div id="destination" hidden><span class="eyebrow">SAVED LOCATION</span><button id="folder-link" class="path" title="Open the folder containing this video"></button><p id="file-name"></p><button id="reveal" class="secondary">Show in Finder</button></div></section>
+<button id="download" class="primary">↓ Download video</button><button id="cancel" class="secondary" hidden>Cancel download</button><button id="stream" class="text-button">Download stream instead</button><p id="feedback" role="alert" hidden></p>
+<footer><span>Local processing · No uploads</span><button id="notifications" class="text-button" hidden>Enable completion notifications</button></footer>
+<details><summary>Local helper setup</summary><p>For streaming videos, install the helper as described in the project README. Your extension ID:</p><code id="extension-id"></code><p>Keep Chrome running while downloading. Streams are saved in Downloads / SharePoint Videos.</p></details>
 <script type="module" src="popup.js"></script></body></html>

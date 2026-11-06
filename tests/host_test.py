@@ -31,3 +31,65 @@ class HostTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class DownloadLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        host.cancelled.clear()
+        host.active_process = None
+    def tearDown(self):
+        host.cancelled.clear()
+        host.active_process = None
+    def fake_download(self, lines, exit_code=0):
+        import tempfile
+        from unittest.mock import MagicMock
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            output = root / 'Downloads' / 'SharePoint Videos'
+            output.mkdir(parents=True)
+            saved = output / 'Workshop.mp4'
+            saved.write_bytes(b'video-fixture')
+            process = MagicMock()
+            process.stdout = [line.replace('OUTPUT', str(saved)) for line in lines]
+            process.wait.return_value = exit_code
+            process.poll.return_value = exit_code
+            messages = []
+            with patch.object(host.Path, 'home', return_value=root), patch.object(host, 'executable', side_effect=lambda name:'/bin/'+name), patch.object(host.subprocess, 'Popen', return_value=process) as launch, patch.object(host, 'send', side_effect=messages.append):
+                try:
+                    host.download({'action':'download','url':'https://tenant.sharepoint.com/manifest?secret=private','title':'Workshop'})
+                except host.DownloadError as error:
+                    return messages, error.code
+                command = launch.call_args.args[0]
+                self.assertNotIn('https://tenant.sharepoint.com/manifest?secret=private', command)
+                self.assertIn('--abort-on-unavailable-fragments', command)
+            return messages, None
+    def test_progress_never_restarts_and_completion_contains_location(self):
+        messages, error = self.fake_download(['PROGRESS:video|h264|90%\n','PROGRESS:video|h264|100%\n','PROGRESS:audio|none|5%\n','PROGRESS:audio|none|100%\n','[Merger] Merging formats\n','FILE:OUTPUT\n'])
+        self.assertIsNone(error)
+        values = [message['progress'] for message in messages if 'progress' in message]
+        self.assertEqual(values, sorted(values))
+        self.assertEqual(messages[-1]['state'], 'complete')
+        self.assertTrue(messages[-1]['folder'].endswith('SharePoint Videos'))
+        self.assertTrue(messages[-1]['path'].endswith('Workshop.mp4'))
+    def test_authentication_failure_is_classified_for_automatic_refresh(self):
+        messages, code = self.fake_download(['ERROR: HTTP Error 403: Forbidden\n'], 1)
+        self.assertEqual(code, 'AUTH_EXPIRED')
+        self.assertFalse(any(m.get('state') == 'complete' for m in messages))
+    def test_cancel_never_reports_success(self):
+        host.cancelled.set()
+        messages, error = self.fake_download(['FILE:OUTPUT\n'])
+        self.assertEqual(messages[-1]['state'], 'cancelled')
+    def test_reveal_rejects_paths_outside_the_download_directory(self):
+        with patch.object(host.subprocess, 'run') as launch:
+            with self.assertRaises(ValueError):
+                host.reveal('/etc/hosts')
+            launch.assert_not_called()
+    def test_reveal_selects_the_actual_saved_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            saved = root / 'Downloads/SharePoint Videos/Workshop.mp4'
+            saved.parent.mkdir(parents=True)
+            saved.write_bytes(b'video')
+            with patch.object(host.Path,'home',return_value=root), patch.object(host.sys,'platform','darwin'), patch.object(host.subprocess,'run') as launch, patch.object(host,'send'):
+                host.reveal(str(saved))
+                self.assertEqual(launch.call_args.args[0],['open','-R',str(saved.resolve())])

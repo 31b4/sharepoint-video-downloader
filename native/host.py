@@ -8,10 +8,30 @@ import shutil
 import struct
 import subprocess
 import sys
+import signal
+import threading
+import time
 import tempfile
 from urllib.parse import urlsplit
 
 MAX_MESSAGE = 128 * 1024
+cancelled = threading.Event()
+active_process = None
+
+class DownloadError(ValueError):
+    def __init__(self, message, code='DOWNLOAD_FAILED'):
+        super().__init__(message)
+        self.code = code
+
+def stop_download():
+    cancelled.set()
+    process = active_process
+    if process is not None and process.poll() is None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
 
 
 def read_exact(stream, count):
@@ -36,12 +56,17 @@ def read_message(stream):
     return json.loads(read_exact(stream, length))
 
 
-def send(message):
+def send(message, persist=True):
     # Keep only the latest local status, never the source URL.
+    message = {**message, 'updatedAt': int(time.time() * 1000)}
     status_file = Path(__file__).with_name('last-status.json')
     try:
-        status_file.write_text(json.dumps(message))
-        status_file.chmod(0o600)
+        if persist:
+            temp_status = status_file.with_name(f'.status-{os.getpid()}.tmp')
+            fd = os.open(temp_status, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w') as status_stream:
+                json.dump({**message, 'pid': os.getpid()}, status_stream)
+            os.replace(temp_status, status_file)
     except OSError:
         pass
     payload = json.dumps(message).encode('utf-8')
@@ -53,7 +78,7 @@ def valid_url(value):
     try:
         parsed = urlsplit(value)
         host = parsed.hostname or ''
-        return (parsed.scheme == 'https' and not parsed.username and not parsed.password
+        return (not any(ord(c) < 32 for c in value) and parsed.scheme == 'https' and not parsed.username and not parsed.password
                 and parsed.port in (None, 443)
                 and any(host.endswith('.' + domain) for domain in
                         ('sharepoint.com', 'svc.ms', 'microsoftstream.com')))
@@ -80,6 +105,7 @@ def executable(name):
 
 
 def download(message):
+    global active_process
     if not isinstance(message, dict) or message.get('action') != 'download' or not valid_url(message.get('url')):
         raise ValueError('Unsupported download request')
     ytdlp, ffmpeg = executable('yt-dlp'), executable('ffmpeg')
@@ -96,31 +122,55 @@ def download(message):
                 raise ValueError('Invalid URL')
             stream.write(url + '\n')
         command = [ytdlp, '--ignore-config', '--no-playlist', '--no-overwrites', '--newline',
-                   '--no-warnings', '--ffmpeg-location', ffmpeg, '--concurrent-fragments', '4',
+                   '--no-warnings', '--abort-on-unavailable-fragments', '--socket-timeout', '20', '--retries', '3', '--fragment-retries', '3', '--ffmpeg-location', ffmpeg, '--concurrent-fragments', '4',
                    '--merge-output-format', 'mp4', '--remux-video', 'mp4',
-                   '--progress-template', 'download:PROGRESS:%(progress._percent_str)s',
+                   '--progress-template', 'download:PROGRESS:%(info.format_id)s|%(info.vcodec)s|%(progress._percent_str)s',
                    '--print', 'after_move:FILE:%(filepath)s', '--progress',
                    '--output', str(output / (title + '.%(ext)s')), '--batch-file', str(batch)]
-        send({'status': 'Downloading video…', 'progress': 0})
+        send({'state': 'downloading', 'status': 'Downloading video…', 'progress': 0})
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, text=True)
+                                   stderr=subprocess.STDOUT, text=True, errors='replace', start_new_session=True)
+        active_process = process
+        if cancelled.is_set():
+            stop_download()
         completed = None
+        authentication_failed = False
+        current_format = None
+        track = 0
+        overall = 0
         try:
             for line in process.stdout:
+                if 'HTTP Error 401' in line or 'HTTP Error 403' in line:
+                    authentication_failed = True
                 if line.startswith('PROGRESS:'):
-                    match = re.search(r'([\d.]+)%', line)
-                    if match:
-                        send({'status': 'Downloading video and audio…', 'progress': float(match[1])})
+                    values = line[len('PROGRESS:'):].strip().split('|')
+                    match = re.search(r'([\d.]+)%', values[-1])
+                    if match and len(values) == 3:
+                        format_id, codec, _ = values
+                        if current_format is not None and format_id != current_format:
+                            track += 1
+                        current_format = format_id
+                        percent = min(100, max(0, float(match[1])))
+                        overall = max(overall, min(98, track * 49 + percent * .49))
+                        kind = 'audio' if codec == 'none' else 'video'
+                        send({'state': 'downloading', 'status': f'Downloading {kind} · {percent:.0f}% of this track', 'progress': overall})
                 elif line.startswith('FILE:'):
                     completed = Path(line[5:].strip())
                 elif '[Merger]' in line or '[VideoRemuxer]' in line:
-                    send({'status': 'Combining audio and video…'})
-            if process.wait() != 0:
-                raise ValueError('Download failed. Reload the SharePoint video and retry. Its link may have expired or access may be restricted.')
+                    send({'state': 'merging', 'status': 'Combining audio and video…', 'progress': 99})
+            exit_code = process.wait()
+            if cancelled.is_set():
+                send({'state': 'cancelled', 'status': 'Download cancelled. Partial files can be resumed on retry.'})
+                return
+            if exit_code != 0:
+                if authentication_failed:
+                    raise DownloadError('SharePoint rejected the video link. Refreshing may be required.', 'AUTH_EXPIRED')
+                raise DownloadError('The download could not finish. Check your connection and retry; partial files will resume.')
             if not completed or not completed.is_file() or completed.stat().st_size == 0:
                 raise ValueError('The download finished without a video file.')
-            send({'state': 'complete', 'status': 'Download complete', 'progress': 100, 'path': str(completed)})
+            send({'state': 'complete', 'status': 'Download complete', 'progress': 100, 'path': str(completed), 'folder': str(completed.parent), 'size': completed.stat().st_size})
         finally:
+            active_process = None
             if process.poll() is None:
                 process.terminate()
                 try:
@@ -130,16 +180,73 @@ def download(message):
                     process.wait()
 
 
+def reveal(path):
+    if not isinstance(path, str):
+        raise ValueError('Missing saved file')
+    saved = Path(path).resolve()
+    root = (Path.home() / 'Downloads' / 'SharePoint Videos').resolve()
+    if not saved.is_relative_to(root) or not saved.is_file():
+        raise ValueError('Saved file not found in the download folder')
+    command = ['open', '-R', str(saved)] if sys.platform == 'darwin' else ['xdg-open', str(saved.parent)]
+    subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    send({'state': 'revealed', 'status': 'Opened the saved file location.'}, persist=False)
+
+
+def get_status():
+    status_file = Path(__file__).with_name('last-status.json')
+    if not status_file.exists():
+        send({'state': 'idle', 'status': 'Ready to download.'}, persist=False)
+        return
+    saved = json.loads(status_file.read_text())
+    saved.setdefault('updatedAt', int(status_file.stat().st_mtime * 1000))
+    if saved.get('status') == 'Download complete' and saved.get('path'):
+        saved.update(state='complete', folder=str(Path(saved['path']).parent))
+    if saved.get('state') in ('downloading', 'merging'):
+        try:
+            os.kill(saved.get('pid', -1), 0)
+        except (ProcessLookupError, PermissionError):
+            saved.update(state='error', status='The previous download was interrupted. Retry to resume it.', progress=None)
+    # Preserve the timestamp of the original job for extension result reconciliation.
+    payload = json.dumps(saved).encode('utf-8')
+    sys.stdout.buffer.write(struct.pack('=I', len(payload)) + payload)
+    sys.stdout.buffer.flush()
+
+
+def watch_controls():
+    try:
+        while True:
+            message = read_message(sys.stdin.buffer)
+            if message is None or message.get('action') == 'cancel':
+                stop_download()
+                return
+    except (ValueError, OSError):
+        stop_download()
+
+
 def main():
+    action = None
     try:
         message = read_message(sys.stdin.buffer)
-        if message is not None:
+        if not isinstance(message, dict):
+            return
+        action = message.get('action')
+        if action == 'status':
+            get_status()
+        elif action == 'reveal':
+            reveal(message.get('path'))
+        elif action == 'download':
+            threading.Thread(target=watch_controls, daemon=True).start()
             download(message)
+        else:
+            raise ValueError('Unsupported action')
+    except DownloadError as error:
+        send({'state': 'error', 'code': error.code, 'status': str(error)})
     except ValueError as error:
-        send({'state': 'error', 'status': str(error) if str(error).startswith(('Download failed.', 'Install ', 'The download finished')) else 'Invalid download request.'})
-    except OSError:
-        # Never include exception details: upstream messages can contain signed URLs.
-        send({'state': 'error', 'status': 'Download failed. Check helper dependencies, reload the video, and retry.'})
+        send({'state': 'error', 'status': str(error) if str(error).startswith(('Install ', 'The download finished')) else 'The saved file or download request is invalid.'}, persist=action == 'download')
+    except BrokenPipeError:
+        stop_download()
+    except (OSError, subprocess.SubprocessError):
+        send({'state': 'error', 'status': 'The local helper could not finish. Check dependencies and retry.'}, persist=action == 'download')
 
 
 if __name__ == '__main__':
