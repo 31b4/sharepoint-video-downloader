@@ -43,4 +43,4 @@ manifest.write_text(json.dumps({'name': NAME, 'description': 'Local SharePoint v
                                 'path': str(launcher), 'type': 'stdio',
                                 'allowed_origins': [f'chrome-extension://{args.extension_id}/']}, indent=2))
 manifest.chmod(0o600)
-print('Helper installed. Open the video and choose Download stream with helper.')
+print('Helper installed. Open the video and choose Download this video.')

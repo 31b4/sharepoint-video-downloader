@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 MAX_MESSAGE = 128 * 1024
 cancelled = threading.Event()
 active_process = None
+job_context = {}
 
 class DownloadError(ValueError):
     def __init__(self, message, code='DOWNLOAD_FAILED'):
@@ -58,7 +59,7 @@ def read_message(stream):
 
 def send(message, persist=True):
     # Keep only the latest local status, never the source URL.
-    message = {**message, 'updatedAt': int(time.time() * 1000)}
+    message = {**job_context, **message, 'updatedAt': int(time.time() * 1000)}
     status_file = Path(__file__).with_name('last-status.json')
     try:
         if persist:
@@ -105,9 +106,10 @@ def executable(name):
 
 
 def download(message):
-    global active_process
+    global active_process, job_context
     if not isinstance(message, dict) or message.get('action') != 'download' or not valid_url(message.get('url')):
         raise ValueError('Unsupported download request')
+    job_context = {'jobId': str(message.get('jobId', ''))[:64], 'sourceKey': message.get('sourceKey') if re.fullmatch('[0-9a-f]{64}', str(message.get('sourceKey', ''))) else None, 'title': str(message.get('title', 'SharePoint video'))[:200]}
     ytdlp, ffmpeg = executable('yt-dlp'), executable('ffmpeg')
     output = Path.home() / 'Downloads' / 'SharePoint Videos'
     output.mkdir(parents=True, exist_ok=True)
@@ -168,7 +170,8 @@ def download(message):
                 raise DownloadError('The download could not finish. Check your connection and retry; partial files will resume.')
             if not completed or not completed.is_file() or completed.stat().st_size == 0:
                 raise ValueError('The download finished without a video file.')
-            send({'state': 'complete', 'status': 'Download complete', 'progress': 100, 'path': str(completed), 'folder': str(completed.parent), 'size': completed.stat().st_size})
+            details = validate_video(completed)
+            send({**details, 'state': 'complete', 'status': 'Download complete', 'progress': 100, 'path': str(completed), 'folder': str(completed.parent), 'size': completed.stat().st_size})
         finally:
             active_process = None
             if process.poll() is None:
@@ -178,6 +181,22 @@ def download(message):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+
+
+def validate_video(path):
+    result = subprocess.run([executable('ffprobe'), '-v', 'error', '-select_streams', 'v:0',
+                             '-show_entries', 'stream=codec_type:format=duration', '-of', 'json', str(path)],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30)
+    try:
+        metadata = json.loads(result.stdout)
+        if result.returncode or not any(stream.get('codec_type') == 'video' for stream in metadata.get('streams', [])):
+            raise ValueError('No video stream')
+        duration = float(metadata.get('format', {}).get('duration', 0))
+        if duration <= 0:
+            raise ValueError('Missing video duration')
+        return {'duration': duration}
+    except (ValueError, TypeError, AttributeError):
+        raise DownloadError('The server response was not a playable video. No video was marked complete.', 'INVALID_MEDIA')
 
 
 def reveal(path):

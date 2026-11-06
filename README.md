@@ -1,12 +1,12 @@
 # SharePoint Video Downloader
 
-A local-first Chrome/Edge extension for saving videos from your signed-in SharePoint browser session. A small optional helper handles DASH streams with yt-dlp and FFmpeg.
+A local-first Chrome/Edge extension for saving videos from your signed-in SharePoint browser session. A small required local helper retrieves and verifies videos with yt-dlp, FFmpeg, and FFprobe.
 
-**Early release (0.2.0).** Validated end to end on macOS with Chrome: a private SharePoint DASH recording downloaded and merged into a 1080p MP4 with AAC audio. Other tenants and browsers still need validation. It is not published in the Chrome Web Store.
+**Early release (0.2.1).** Validated end to end on macOS with Chrome: a private SharePoint DASH recording downloaded and merged into a 1080p MP4 with AAC audio. Other tenants and browsers still need validation. It is not published in the Chrome Web Store.
 
 ## Why an extension and a helper?
 
-The extension works across desktop operating systems. When SharePoint supplies a usable original-file URL, Chrome can download it without a separate app. For segmented streams, this version uses a local helper to download and combine audio/video reliably. There is no desktop dashboard or Java runtime.
+The extension works across desktop operating systems. This version always uses the local helper to retrieve and verify the actual video. It does not send unverified SharePoint URLs to Chrome’s download manager. This avoids metadata/error responses being offered as JSON files. The helper combines segmented audio/video when needed. There is no desktop dashboard or Java runtime.
 
 | Component | Support |
 | --- | --- |
@@ -19,9 +19,9 @@ The extension works across desktop operating systems. When SharePoint supplies a
 
 1. Clone or download this repository into a permanent folder.
 2. Open `chrome://extensions` (or `edge://extensions`), enable **Developer mode**, choose **Load unpacked**, and select the `extension` directory.
-3. Open your SharePoint video and click the extension. **Download video** tries an original-file URL first; when no URL is available, it uses the helper. **Download stream with helper** explicitly selects streaming.
+3. Open your SharePoint video and click the extension. The popup shows the current page’s video; choose **Download this video**. A previous recording is displayed separately under **Last saved video**, with its own filename and folder.
 
-For streaming, install dependencies:
+Install the required local helper dependencies:
 
 ```sh
 brew install python yt-dlp ffmpeg
@@ -33,9 +33,9 @@ Copy your extension ID from its Chrome extensions card or the popup’s **Local 
 python3 native/install.py YOUR_EXTENSION_ID
 ```
 
-For Edge, append `--browser edge`. The installer registers a host for that extension ID only. No administrator access is required. Reload the video and choose **Download stream with helper**.
+For Edge, append `--browser edge`. The installer registers a host for that extension ID only. No administrator access is required. Reload the video and choose **Download this video**.
 
-Streaming downloads are saved to `~/Downloads/SharePoint Videos`. Browser downloads use Chrome’s Save dialog. The completed popup shows the exact folder and filename; click either the folder path or **Show in Finder** to reveal the file.
+Streaming downloads are saved to `~/Downloads/SharePoint Videos`. There is no Chrome Save dialog or separate JSON download. The completed popup shows the exact folder and filename; click either the folder path or **Show in Finder** to reveal the file.
 
 Keep Chrome running until completion. You can close and reopen the popup while downloading. The toolbar badge shows progress, and the final result remains available after the helper exits. The helper handles one streaming job at a time. **Cancel download** stops the transfer; retry can resume partial files.
 
@@ -45,7 +45,9 @@ Choose **Enable completion notifications** in the popup once to allow notificati
 
 - Expired signed video links are detected before downloading where their expiry is available.
 - A rejected stream link triggers one automatic SharePoint refresh and retry. Playback position is restored where the player permits it. No DevTools or manual network inspection is required.
-- If a browser download fails, the extension automatically attempts the local streaming helper. Cancelling a Save dialog or download does not trigger a retry.
+- All downloads go through the helper. SharePoint metadata and error responses are never downloaded as files. A file must contain a video stream with a positive duration before completion is reported.
+- Status is matched to the selected meeting using a hash of its file identity. Opening a different meeting starts with “Ready to download”; retry/error/completion state from another meeting is not presented as the current one.
+- A previous saved recording remains available in a clearly separate **Last saved video** panel.
 - Other failures produce a clear retry message. Permission restrictions and sign-in requirements cannot be repaired automatically.
 - Progress stays monotonic across audio and video transfers, then shows a separate combining stage. Terminal success/error messages are preserved after normal helper exit.
 
@@ -60,7 +62,7 @@ Install Python 3, yt-dlp and FFmpeg using your package manager, load the extensi
 ## Privacy and permissions
 
 - Runs only when you click Download on the active SharePoint tab; no background browsing monitoring.
-- Uses `activeTab` and `scripting` to inspect the current video page; `downloads` to save files; `nativeMessaging` for the optional local helper; `storage.session` for job status; optional `notifications` for completion alerts. The helper also keeps a local `last-status.json` with the latest status and completed file path, never the source URL.
+- Uses `activeTab` and `scripting` to inspect the current video page; `nativeMessaging` for the optional local helper; `storage.session` for job status; optional `notifications` for completion alerts. The helper also keeps a local `last-status.json` with the latest status and completed file path, never the source URL.
 - No analytics, project backend, cookie export, password collection, or persistent signed-URL storage.
 - SharePoint metadata and media requests go to Microsoft’s servers. The helper receives the single selected stream URL and never opens a local HTTP server.
 - The helper writes the signed URL into a private temporary file for yt-dlp, removes it after completion, and suppresses raw tool output that could contain credentials. Partial media files may remain after failure.
@@ -70,9 +72,9 @@ Install Python 3, yt-dlp and FFmpeg using your package manager, load the extensi
 
 - Access to a video does not guarantee download access. This tool does not implement DRM decryption or change SharePoint permissions.
 - Microsoft’s player metadata (`g_fileInfo`) is an undocumented integration point and can change.
-- Browser download failures fall back to the streaming helper; stream authorization errors refresh the page and retry once. If the retry still fails, check your SharePoint sign-in and helper dependencies. Some tenant policies or authentication flows are unsupported.
+- Stream authorization errors refresh the page and retry once. If the retry still fails, check your SharePoint sign-in and helper dependencies. Some tenant policies or authentication flows are unsupported.
 - Microsoft has announced changes to pre-authenticated download URLs beginning April 1, 2027. An explicit Entra/OAuth integration may become necessary; this prototype does not implement it.
-- Overall progress allocates stages to audio/video transfers; the status text also shows the current track’s percentage. Completion is reported only after a nonempty output file exists. Unavailable fragments fail the job rather than silently yielding a partial recording.
+- Overall progress allocates stages to audio/video transfers; the status text also shows the current track’s percentage. Completion is reported only after FFprobe verifies that the output is a nonempty playable video. Unavailable fragments fail the job rather than silently yielding a partial recording.
 
 ## Uninstall
 
@@ -92,7 +94,7 @@ No build step or JavaScript dependencies are required. Load `extension/` directl
 npm test
 ```
 
-Tests cover URL restrictions, filename sanitization, native-message framing, expired-link retry limits, cancellation, Chrome download tracking, progress continuity, terminal-status recovery, completion notifications, and file reveal restrictions. Automated mocks do not prove compatibility with every live SharePoint tenant.
+Tests cover URL restrictions, filename sanitization, native-message framing, expired-link retry limits, cancellation, current-meeting identity, rejection of JSON responses, progress continuity, terminal-status recovery, completion notifications, and file reveal restrictions. Automated mocks do not prove compatibility with every live SharePoint tenant.
 
 ## Acknowledgment and license
 

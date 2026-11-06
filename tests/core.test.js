@@ -21,3 +21,17 @@ test('expired nested SharePoint signatures are detected without changing the URL
   assert.equal(expiresSoon('https://media.svc.ms/manifest?P1=1700001000',now),false);
   assert.equal(expiresSoon('not a url',now),false);
 });
+
+test('different meetings never share retry or completion state', async()=>{
+  const {sourceKey,currentView}=await import('../extension/core.js');
+  const first=await sourceKey('https://tenant.sharepoint.com/_layouts/15/stream.aspx?id=%2FDocuments%2FFirst.mp4&referrer=old');
+  const same=await sourceKey('https://tenant.sharepoint.com/_layouts/15/stream.aspx?id=%2FDocuments%2FFirst.mp4&referrer=new');
+  const second=await sourceKey('https://tenant.sharepoint.com/_layouts/15/stream.aspx?id=%2FDocuments%2FSecond.mp4');
+  assert.equal(first,same);assert.notEqual(first,second);
+  const old={state:'error',sourceKey:first,title:'First meeting',status:'Failed'};
+  assert.equal(currentView(old,second,'Second meeting').title,'Second meeting');
+  assert.equal(currentView(old,second,'Second meeting').state,'idle');
+  assert.equal(currentView(old,first,'First meeting').state,'error');
+  assert.equal(currentView({...old,state:'complete'},second,'Second meeting').state,'idle');
+  assert.equal(currentView({state:'complete',title:'Legacy result with no identity'},second,'Second meeting').state,'idle');
+});

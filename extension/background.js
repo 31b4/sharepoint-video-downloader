@@ -1,15 +1,17 @@
-import {allowedUrl, filename, expiresSoon} from './core.js';
+import {allowedUrl, filename, expiresSoon, sourceKey} from './core.js';
 const HOST = 'io.github.sharepoint_video_downloader';
 const ACTIVE = new Set(['reading','refreshing','connecting','downloading','merging','cancelling']);
+let savedVideo = null;
 let job = null, port = null, busy = false, cancelled = false;
 let writes = Promise.resolve();
-const ready = chrome.storage.session.get('job').then(data => {job = data.job || null;});
+const ready = chrome.storage.session.get(['job','savedVideo']).then(data => {job = data.job || null;savedVideo = data.savedVideo || (job?.state==='complete'?job:null);});
 
 function update(patch) {
   job = {...job, ...patch, updatedAt:Date.now()};
   const snapshot = {...job};
   writes = writes.catch(()=>{}).then(async () => {
-    await chrome.storage.session.set({job:snapshot});
+    if(snapshot.state==='complete'&&snapshot.path)savedVideo=snapshot;
+    await chrome.storage.session.set({job:snapshot,savedVideo});
     const badge = snapshot.state === 'complete' ? '✓' : snapshot.state === 'error' ? '!' :
       ACTIVE.has(snapshot.state) ? (Number.isFinite(snapshot.progress) ? Math.floor(snapshot.progress)+'%' : '…') : '';
     await chrome.action.setBadgeText({text:badge});
@@ -30,23 +32,10 @@ async function notify() {
 async function inspectPage() {
   const info = window.g_fileInfo || {};
   let transform = info['.transformUrl'] || info['.providerCdnTransformUrl'];
-  let direct = info['@microsoft.graph.downloadUrl'] || info['.downloadUrl'];
   const title = document.title;
   if (transform) {
     try {
       const manifest = new URL(transform, location.href);
-      const docid = manifest.searchParams.get('docid');
-      if (docid) {
-        const item = new URL(docid);
-        if (item.origin === location.origin) {
-          item.search = '';
-          const response = await fetch(item, {credentials:'same-origin',headers:{Accept:'application/json'},signal:AbortSignal.timeout(8000)}).catch(()=>null);
-          if (response?.ok) {
-            const metadata = await response.json();
-            direct ||= metadata['@microsoft.graph.downloadUrl'] || metadata['@content.downloadUrl'];
-          }
-        }
-      }
       manifest.pathname = manifest.pathname.replace(/\/transform\/[^/]*$/, '/transform/videomanifest');
       manifest.searchParams.set('part','index');
       manifest.searchParams.set('format','dash');
@@ -54,8 +43,8 @@ async function inspectPage() {
     } catch {transform = null;}
   }
   const video = document.querySelector('video');
-  if (!direct && /^https:/.test(video?.currentSrc || '')) direct = video.currentSrc;
-  return {title,direct,manifest:transform};
+  if (!transform && /^https:/.test(video?.currentSrc || '')) transform = video.currentSrc;
+  return {title,manifest:transform};
 }
 async function inspect(tabId) {
   const result = await chrome.scripting.executeScript({target:{tabId},world:'MAIN',func:inspectPage});
@@ -80,7 +69,7 @@ async function refresh(tabId) {
     const tab=await chrome.tabs.get(tabId);
     if(tab.status !== 'complete') continue;
     const media=await inspect(tabId).catch(()=>null);
-    if(!media?.manifest && !media?.direct) continue;
+    if(!media?.manifest) continue;
     if(media.manifest && expiresSoon(media.manifest)) continue;
     if(playback) await chrome.scripting.executeScript({target:{tabId},args:[playback],func:previous=>{
       const video=document.querySelector('video');
@@ -104,9 +93,8 @@ function nativeRequest(message) {
 }
 async function reveal() {
   await ready;
-  if(job?.state !== 'complete') throw new Error('Finish a download before opening its location.');
-  if(job.downloadId !== undefined) {await chrome.downloads.show(job.downloadId);return;}
-  const result=await nativeRequest({action:'reveal',path:job.path});
+  if(!savedVideo?.path) throw new Error('Finish a download before opening its location.');
+  const result=await nativeRequest({action:'reveal',path:savedVideo.path});
   if(result.state==='error') throw new Error(result.status);
 }
 function stream(media) {
@@ -127,10 +115,10 @@ function stream(media) {
       if(terminal)resolve(terminal);
       else reject(new Error(error ? 'The local helper stopped unexpectedly. Check setup and retry.' : 'The helper ended without confirming the saved file.'));
     });
-    connection.postMessage({action:'download',url:media.manifest,title:filename(media.title),jobId:job.id});
+    connection.postMessage({action:'download',url:media.manifest,title:filename(media.title),jobId:job.id,sourceKey:job.sourceKey});
   });
 }
-async function run(tabId,mode) {
+async function run(tabId) {
   await ready;
   if(busy)throw new Error('A download is already running.');
   busy=true;cancelled=false;
@@ -138,20 +126,16 @@ async function run(tabId,mode) {
   const tab=await chrome.tabs.get(tabId);
   if(!allowedUrl(tab.url)||!new URL(tab.url).hostname.endsWith('.sharepoint.com')) throw new Error('Open the SharePoint video in this tab first.');
     if(chrome.notifications)await chrome.notifications.clear('sharepoint-download').catch(()=>{});
-    job={id:crypto.randomUUID(),tabId,title:tab.title || 'SharePoint video',state:'reading',status:'Finding your video…',progress:null};
+    job={id:crypto.randomUUID(),tabId,sourceKey:await sourceKey(tab.url),title:tab.title || 'SharePoint video',state:'reading',status:'Finding your video…',progress:null};
     await update({});
     let media=await inspect(tabId);
     checkCancelled();
     let refreshed=false;
-    if(!media?.manifest&&!media?.direct || media?.manifest&&expiresSoon(media.manifest)) {
+    if(!media?.manifest || expiresSoon(media.manifest)) {
       media=await refresh(tabId);refreshed=true;
     }
     checkCancelled();
-    if(mode!=='stream'&&allowedUrl(media?.direct)) {
-      const id=await chrome.downloads.download({url:media.direct,filename:filename(media.title),saveAs:true});
-      await update({state:'downloading',status:'Downloading through Chrome…',downloadId:id});
-      return; // downloads.onChanged owns completion from here.
-    }
+    await update({title:media?.title || job.title});
     while(true) {
       checkCancelled();
       if(!allowedUrl(media?.manifest))throw new Error('No supported video stream found. Make sure this video plays in SharePoint.');
@@ -167,7 +151,7 @@ async function run(tabId,mode) {
   } catch(error) {
     await update({state:cancelled?'cancelled':'error',status:cancelled?'Download cancelled. Partial files can be resumed on retry.':error.message,progress:null});
     if(!cancelled)await notify();
-  } finally {if(job?.downloadId===undefined || job.state!=='downloading')busy=false;}
+  } finally {busy=false;}
 }
 async function status() {
   await ready;
@@ -175,27 +159,11 @@ async function status() {
     try {
       const saved=await nativeRequest({action:'status'});
       // Recover the previous helper result after extension reload or popup closure.
-      if(['complete','error','cancelled','downloading','merging'].includes(saved.state)&&(!job?.updatedAt||saved.updatedAt>job.updatedAt))await update(saved);
+      if(['complete','error','cancelled','downloading','merging'].includes(saved.state)&&(!job?.updatedAt||saved.updatedAt>job.updatedAt))await update({...saved,sourceKey:saved.sourceKey || null,id:saved.jobId || null,title:saved.title || saved.path?.split(/[\\/]/).pop() || 'Previous download'});
     } catch { /* A missing optional helper must not hide a browser-only result. */ }
   }
   return job;
 }
-chrome.downloads.onChanged.addListener(async delta=>{
-  await ready;
-  if(delta.id!==job?.downloadId)return;
-  if(delta.state?.current==='complete') {
-    const [item]=await chrome.downloads.search({id:delta.id});
-    await update({state:'complete',status:'Download complete',path:item.filename,folder:item.filename.replace(/[\\/][^\\/]+$/,''),progress:100});
-    busy=false;await notify();
-  } else if(delta.state?.current==='interrupted') {
-    busy=false;
-    if(delta.error?.current==='USER_CANCELED'||cancelled) {
-      await update({state:'cancelled',status:'Download cancelled.',progress:null});
-    } else {
-      await run(job.tabId,'stream');
-    }
-  }
-});
 let notificationHandlersRegistered=false;
 function registerNotificationHandlers() {
   if(notificationHandlersRegistered || !chrome.notifications)return;
@@ -212,15 +180,18 @@ chrome.runtime.onMessage.addListener((message,sender,reply)=>{
     await ready;
     if(message.action==='download') {
       if(busy)return {error:'A download is already running.'};
-      run(message.tabId,message.mode).catch(error=>update({state:'error',status:error.message}));
+      run(message.tabId).catch(error=>update({state:'error',status:error.message}));
       return {ok:true};
     }
-    if(message.action==='status')return {job:await status()};
+    if(message.action==='status')return {job:await status(),savedVideo};
+    if(message.action==='context') {
+      const tab=await chrome.tabs.get(message.tabId);
+      return {sourceKey:await sourceKey(tab.url),title:tab.title || 'SharePoint video',supported:allowedUrl(tab.url)&&new URL(tab.url).hostname.endsWith('.sharepoint.com'),job:await status(),savedVideo};
+    }
     if(message.action==='reveal'){await reveal();return {ok:true};}
     if(message.action==='cancel') {
       cancelled=true;
-      if(job?.downloadId!==undefined)await chrome.downloads.cancel(job.downloadId);
-      else if(port) {await update({state:'cancelling',status:'Cancelling download…'});port.postMessage({action:'cancel'});}
+      if(port) {await update({state:'cancelling',status:'Cancelling download…'});port.postMessage({action:'cancel'});}
       return {ok:true};
     }
     return {error:'Unsupported action.'};

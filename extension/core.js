@@ -19,3 +19,17 @@ export function expiresSoon(value, now = Date.now()) {
     return expiry > 0 && expiry * 1000 < now + 60000;
   } catch {return false;}
 }
+
+export async function sourceKey(value) {
+  try {
+    const url = new URL(value);
+    const id = url.searchParams.get('id');
+    const identity = url.origin + (id ? id.normalize('NFC') : url.pathname);
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(identity));
+    return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2,'0')).join('');
+  } catch {return null;}
+}
+export function currentView(job, key, title) {
+  const same = Boolean(key && job?.sourceKey === key);
+  return same ? job : {state:'idle',title,status:'Ready to save this video.',progress:null};
+}

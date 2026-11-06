@@ -50,33 +50,33 @@ test('duplicate clicks cannot start two downloads; cancel reaches the helper',as
   await f.request({action:'cancel'});assert.equal(f.ports[0].sent.at(-1).action,'cancel');
   f.ports[0].emit({state:'cancelled',status:'Cancelled'});f.ports[0].end();await until(()=>f.updates.at(-1)?.state==='cancelled');
 });
-test('Chrome downloads are tracked through completion and show their folder',async()=>{
-  const f=await setup({media:()=>({title:'Workshop',direct:'https://tenant.sharepoint.com/file.mp4'})});
-  await f.request({action:'download',tabId:1});await until(()=>f.updates.at(-1)?.downloadId===42);
-  await f.changed({id:42,state:{current:'complete'}});assert.equal(f.updates.at(-1).folder,'/Downloads');
-});
 test('popup recovers a helper completion after extension reload',async()=>{
   const f=await setup();const response=f.request({action:'status'});await until(()=>f.ports[0]?.sent.length);
   f.ports[0].emit({state:'complete',status:'Download complete',path:'/Downloads/old.mp4',folder:'/Downloads',updatedAt:Date.now()});
   assert.equal((await response).job.path,'/Downloads/old.mp4');
 });
-test('failed browser transfer automatically falls back to the helper',async()=>{
-  const f=await setup({media:()=>({title:'Workshop',direct:'https://tenant.sharepoint.com/file.mp4',manifest:'https://media.svc.ms/transform/videomanifest'})});
-  await f.request({action:'download',tabId:1});await until(()=>f.updates.at(-1)?.downloadId===42);
-  const fallback=f.changed({id:42,state:{current:'interrupted'},error:{current:'SERVER_FORBIDDEN'}});
-  await until(()=>f.ports[0]?.sent[0]?.action==='download');
-  f.ports[0].emit({state:'complete',status:'Download complete',path:'/Downloads/Workshop.mp4',folder:'/Downloads'});f.ports[0].end();
-  await fallback;assert.equal(f.updates.at(-1).state,'complete');
-});
-test('cancelling a Chrome download never starts the helper',async()=>{
-  const f=await setup({media:()=>({title:'Workshop',direct:'https://tenant.sharepoint.com/file.mp4'})});
-  await f.request({action:'download',tabId:1});await until(()=>f.updates.at(-1)?.downloadId===42);
-  await f.changed({id:42,state:{current:'interrupted'},error:{current:'USER_CANCELED'}});
-  assert.equal(f.ports.length,0);assert.equal(f.updates.at(-1).state,'cancelled');
-});
-
 test('downloads work when optional notification APIs are unavailable',async()=>{
   const f=await setup({noNotifications:true});await f.request({action:'download',tabId:1,mode:'stream'});await until(()=>f.ports[0]?.sent.length);
   f.ports[0].emit({state:'complete',status:'Download complete',path:'/Downloads/video.mp4',folder:'/Downloads'});f.ports[0].end();
   await until(()=>f.updates.at(-1)?.state==='complete');assert.equal(f.notifications.length,0);
+});
+
+test('an unverified metadata URL never opens Chrome Save As or downloads JSON',async()=>{
+  const f=await setup({media:()=>({title:'New meeting',direct:'https://tenant.sharepoint.com/metadata.json',manifest:'https://media.svc.ms/transform/videomanifest'})});
+  let browserDownloads=0;chrome.downloads.download=async()=>{browserDownloads++;};
+  await f.request({action:'download',tabId:1});await until(()=>f.ports[0]?.sent.length);
+  assert.equal(browserDownloads,0);assert.equal(f.ports[0].sent[0].url,'https://media.svc.ms/transform/videomanifest');
+  f.ports[0].emit({state:'complete',status:'Download complete',path:'/Downloads/new.mp4',folder:'/Downloads'});f.ports[0].end();
+  await until(()=>f.updates.at(-1)?.state==='complete');
+});
+test('context identifies the selected meeting separately from a previous download',async()=>{
+  const {sourceKey,currentView}=await import('../extension/core.js');
+  const previous={state:'complete',title:'Old meeting',path:'/Downloads/old.mp4',sourceKey:await sourceKey('https://example.sharepoint.com/old'),updatedAt:Date.now()};
+  const f=await setup({stored:previous});
+  const pending=f.request({action:'context',tabId:2});await until(()=>f.ports[0]?.sent.length);
+  f.ports[0].emit({state:'idle'});
+  const context=await pending;
+  assert.equal(context.title,'Workshop');assert.notEqual(context.sourceKey,previous.sourceKey);
+  assert.equal(currentView(context.job,context.sourceKey,context.title).state,'idle');
+  assert.equal(context.savedVideo.title,'Old meeting');
 });
